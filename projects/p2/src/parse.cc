@@ -1,4 +1,12 @@
 #include "parse.h"
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+
 
 /**
 * Given a char buffer returns the parsed request headers
@@ -64,4 +72,9 @@ Request * parse(char *buffer, int size, int socketFd) {
     printf("Parsing Failed\n");
 	return NULL;
 }
+
+
+
+
+
 
