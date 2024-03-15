@@ -13,31 +13,128 @@
 #include <pthread.h>
 #include "parse.h"
 #include <time.h> // For formatting dates
-#define BUF_SIZE 8192
 
 void serve_file(int connFd, char *filepath, char *mimeType, int headOnly);
 void send_404(int connFd);
 void send_501(int connFd);
 char *determine_mime_type(const char *uri);
 
+
+
+#define BUF_SIZE 8192
+#define MAX 256
+
+
+typedef struct Task {
+    int connFd;
+    char *rootFolder;
+    Request *request;
+} Task;
+
+Task taskqueue[MAX];
+int taskcount = 0;
+
+pthread_mutex_t mutexqueue = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t condqueue = PTHREAD_COND_INITIALIZER;
+
+void submitTask(Task task) {
+    // PASS("task submitting to the queue"); 
+    pthread_mutex_lock(&mutexqueue);
+    taskqueue[taskcount++] = task;
+    pthread_mutex_unlock(&mutexqueue);
+    pthread_cond_signal(&condqueue);
+    // PASS("Task submitted to the queue");
+}
+
+void* startThread(void* args) {
+    while(1) {
+        Task task; 
+        pthread_mutex_lock(&mutexqueue);
+        while (taskcount == 0) {
+            pthread_cond_wait(&condqueue, &mutexqueue);
+        }
+        task = taskqueue[0]; 
+        int i; 
+        for (i = 0; i < taskcount - 1; i++) {
+            taskqueue[i] = taskqueue[i + 1];
+        }
+        taskcount--;
+        pthread_mutex_unlock(&mutexqueue);
+        execute(&task); // execute the task
+    }
+}
+
+
+void execute(Task *task) {
+    int connFd = task->connFd;
+    char *rootFolder = task->rootFolder;
+    Request *request = task->request;
+    if (!request) {
+        send_501(connFd); // Send 501 on parse failure
+        close(connFd);
+        return;
+    }
+
+    char *ext = strrchr(request->http_uri, '.');
+        ext = ext ? ext + 1 : ""; // Extract file extension
+        char *mimeType = determine_mime_type(ext);
+        mimeType = mimeType ? mimeType : "application/octet-stream"; // Default to binary stream if unknown
+
+        if (strcmp(request->http_version, "HTTP/1.1")) {
+            send_505(connFd); // HTTP Version Not Supported
+        } else if (strcasecmp(request->http_method, "GET") == 0 || 
+                        strcasecmp(request->http_method, "HEAD") == 0) {
+            char filepath[BUF_SIZE];
+            snprintf(filepath, sizeof(filepath), "%s%s", rootFolder, request->http_uri);
+            serve_file(connFd, filepath, mimeType, strcasecmp(request->http_method, "HEAD") == 0);
+        } else if (strcasecmp(request->http_method, "GET") != 0 && strcasecmp(request->http_method, "HEAD") != 0) {
+            send_501(connFd); // Not Implemented
+        }
+        else {
+            send_400(connFd); // Bad Request
+        }
+        if (request->headers) {
+            free(request->headers); // Free allocated headers
+        }
+        free(request); // Free the request structure
+        close(connFd);
+    
+    
+}
+
 int main(int argc, char **argv) {
     char *port = NULL;
     char *rootFolder = NULL;
+    int numThreads = NULL;
+    int timeout = NULL;
+
+
     struct option longOptions[] = {
         {"port", required_argument, 0, 'p'},
         {"root", required_argument, 0, 'r'},
+        {"numThreads", required_argument, 0, 'n'},
+        {"timeout", required_argument, 0, 't'},
         {0, 0, 0, 0}
     };
-    int optionIndex = 0;
 
+
+    int optionIndex = 0;
     int c;
-    while ((c = getopt_long(argc, argv, "p:r:", longOptions, &optionIndex)) != -1) {
+
+    while ((c = getopt_long(argc, argv, "p:r:n:t:", longOptions, &optionIndex)) != -1) {
         switch (c) {
             case 'p':
                 port = optarg;
                 break;
             case 'r':
                 rootFolder = optarg;
+                break;
+            case 'n':
+                numThreads = atoi(optarg);
+            
+                break;
+            case 't':
+                timeout = atoi(optarg);
                 break;
             default:
                 abort();
@@ -49,6 +146,14 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
+    pthread_t threads[numThreads];
+    pthread_mutex_init(&mutexqueue, NULL);
+    pthread_cond_init(&condqueue, NULL);
+
+    int i;
+    for (i = 0; i < numThreads; i++) {
+        pthread_create(&threads[i], NULL, startThread, NULL);
+    }
     int listenFd = open_listenfd(port);
     if (listenFd < 0) {
         fprintf(stderr, "Failed to open listen socket on port %s\n", port);
@@ -92,34 +197,23 @@ int main(int argc, char **argv) {
             close(connFd);
             continue;
         }
-        printf("Parsed Sucessfully\n"); 
-        printf("Http Method %s\n", request->http_method);
-        printf("Http Version %s\n", request->http_version);
-        // Determine MIME type based on the file extension in the URI
-        char *ext = strrchr(request->http_uri, '.');
-        ext = ext ? ext + 1 : ""; // Extract file extension
-        char *mimeType = determine_mime_type(ext);
-        mimeType = mimeType ? mimeType : "application/octet-stream"; // Default to binary stream if unknown
 
-        if (strccmp(request->http_version, "HTTP/1.1")) {
-            send_505(connFd); // HTTP Version Not Supported
-        } else if (strcasecmp(request->http_method, "GET") == 0 || 
-                        strcasecmp(request->http_method, "HEAD") == 0) {
-            char filepath[BUF_SIZE];
-            snprintf(filepath, sizeof(filepath), "%s%s", rootFolder, request->http_uri);
-            serve_file(connFd, filepath, mimeType, strcasecmp(request->http_method, "HEAD") == 0);
-        } else if (strcasecmp(request->http_method, "GET") != 0 && strcasecmp(request->http_method, "HEAD") != 0) {
-            send_501(connFd); // Not Implemented
-        }
-        else {
-            send_400(connFd); // Bad Request
-        }
-        if (request->headers) {
-            free(request->headers); // Free allocated headers
-        }
-        free(request); // Free the request structure
-        close(connFd);
+        Task *newtask = (Task *) malloc(sizeof(Task));
+        newtask->connFd = connFd;
+        newtask->rootFolder = rootFolder;
+        newtask->request = request;
+        submitTask(*newtask);
+
     }
+    
+    for (i = 0; i < numThreads; i++) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            perror("pthread_join");
+        }
+    }
+
+    pthread_mutex_destroy(&mutexqueue);
+    pthread_cond_destroy(&condqueue);
     return 0;
 }
 
