@@ -32,6 +32,14 @@ void send_505(int connFd);
 void send_400(int connFd);
 void *startThread(void *args);
 void submit(Task task);
+void send_408(int connFd);
+void send_500(int connFd);
+void options_usage(int argc, char **argv);
+
+char *port = ""; 
+char *rootFolder = "";
+int numThreads = 0;
+int timeout = 0;
 
 #define BUF_SIZE 8192
 #define MAX 256
@@ -39,23 +47,24 @@ void submit(Task task);
 Task taskqueue[MAX];
 int taskcount = 0;
 
+#define PASS(msg) printf("PASS: %s\n", msg); 
+
 pthread_mutex_t mutexqueue = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t condqueue = PTHREAD_COND_INITIALIZER;
 
-void submit(Task task)
-{
+void submit(Task task) {
     // PASS("task submitting to the queue");
     pthread_mutex_lock(&mutexqueue);
     taskqueue[taskcount++] = task;
+    task = taskqueue[0];
     pthread_mutex_unlock(&mutexqueue);
     pthread_cond_signal(&condqueue);
     // PASS("Task submitted to the queue");
 }
 
-void *startThread(void *args)
-{
-    while (1)
-    {
+void *startThread(void *args) {
+    while (1) {
+        // PASS("Thread is waiting for a task"); 
         Task task;
         pthread_mutex_lock(&mutexqueue);
         while (taskcount == 0)
@@ -70,17 +79,19 @@ void *startThread(void *args)
         }
         taskcount--;
         pthread_mutex_unlock(&mutexqueue);
+        // PASS("Thread is executing a task"); 
         execute(&task); // execute the task
+        // PASS("Thread is done executing a task"); 
     }
 }
 
-void execute(Task *task)
-{
+
+void execute(Task *task) {
     int connFd = task->connFd;
     char *rootFolder = task->rootFolder;
     Request *request = task->request;
-    if (!request)
-    {
+
+    if (!request) {
         send_501(connFd); // Send 501 on parse failure
         close(connFd);
         return;
@@ -91,29 +102,24 @@ void execute(Task *task)
     char *mimeType = determine_mime_type(ext);
     mimeType = mimeType ? mimeType : "application/octet-stream"; // Default to binary stream if unknown
 
-    if (strcmp(request->http_version, "HTTP/1.1"))
-    {
+    if (strcmp(request->http_version, "HTTP/1.1")) {
         send_505(connFd); // HTTP Version Not Supported
     }
 
-    else if (strcasecmp(request->http_method, "GET") != 0 && strcasecmp(request->http_method, "HEAD") != 0)
-    {
+    else if (strcasecmp(request->http_method, "GET") != 0 && strcasecmp(request->http_method, "HEAD") != 0) {
         send_501(connFd); // Not Implemented
     }
 
     else if (strcasecmp(request->http_method, "GET") == 0 ||
-             strcasecmp(request->http_method, "HEAD") == 0)
-    {
+             strcasecmp(request->http_method, "HEAD") == 0) {
         char filepath[BUF_SIZE];
         snprintf(filepath, sizeof(filepath), "%s%s", rootFolder, request->http_uri);
         serve_file(connFd, filepath, mimeType, strcasecmp(request->http_method, "HEAD") == 0);
     }
-    else
-    {
+    else {
         send_400(connFd); // Bad Request
     }
-    if (request->headers)
-    {
+    if (request->headers) {
         free(request->headers); // Free allocated headers
     }
     free(request); // Free the request structure
@@ -121,12 +127,8 @@ void execute(Task *task)
     close(connFd);
 }
 
-int main(int argc, char **argv)
-{
-    char *port = NULL;
-    char *rootFolder = NULL;
-    int numThreads = NULL;
-    int timeout = NULL;
+
+void options_usage(int argc, char **argv) {
 
     struct option longOptions[] = {
         {"port", required_argument, 0, 'p'},
@@ -138,8 +140,7 @@ int main(int argc, char **argv)
     int optionIndex = 0;
     int c;
 
-    while ((c = getopt_long(argc, argv, "p:r:n:t:", longOptions, &optionIndex)) != -1)
-    {
+    while ((c = getopt_long(argc, argv, "p:r:n:t:", longOptions, &optionIndex)) != -1) {
         switch (c)
         {
         case 'p':
@@ -160,29 +161,41 @@ int main(int argc, char **argv)
         }
     }
 
-    if (port == NULL || rootFolder == NULL)
-    {
+    if (port == NULL || rootFolder == NULL) {
         fprintf(stderr, "Usage: %s --port <portNum> --root <rootFolder>\n", argv[0]);
         exit(1);
     }
+}
+
+
+int main(int argc, char **argv) {
+
+    if (argc < 5) {
+        fprintf(stderr, "Usage: %s --port <portNum> --root <rootFolder> --numThreads <numThreads> --timeout <timeout>\n", argv[0]);
+        exit(1);
+    }
+    options_usage(argc, argv);
+
+
+
+    int listenFd = open_listenfd(port);
 
     pthread_t threads[numThreads];
     pthread_mutex_init(&mutexqueue, NULL);
     pthread_cond_init(&condqueue, NULL);
 
     int i;
-    for (i = 0; i < numThreads; i++)
-    {
+    for (i = 0; i < numThreads; i++) {
         pthread_create(&threads[i], NULL, startThread, NULL);
     }
-    int listenFd = open_listenfd(port);
-    if (listenFd < 0)
-    {
+    if (listenFd < 0) {
         fprintf(stderr, "Failed to open listen socket on port %s\n", port);
         exit(2);
     }   
 
     while (1) {
+
+        printf("waiting for connection\n");
 
         struct sockaddr_storage clientAddr;
         socklen_t clientLen = sizeof(clientAddr);
@@ -193,47 +206,66 @@ int main(int argc, char **argv)
             continue;
         }
 
-        struct pollfd pfd[1];
-        pfd[0].fd = connFd;
-        pfd[0].events = POLLIN;
-        char buf[BUF_SIZE] = "", line[BUF_SIZE] = "";
-        int readline = 0;
-        int numRead = 0;
+        char buf[BUF_SIZE]; 
+        char line[BUF_SIZE];
+        memset(buf, 0, BUF_SIZE);
+        memset(line, 0, BUF_SIZE);
 
-    
+        struct pollfd fds[1]; 
+        int ret;
+        int num_read = 0;
+        int success = 0;
+
         while(1) {
 
-            int pollret = poll(&pfd, 1, timeout * 1000);
+            fds[0].fd = connFd;
+            fds[0].events = POLLIN;
 
-            if (pollret < 0) {
-                printf("Connection is timed out\n");
-                close(connFd);
-                continue;
+            ret = poll(fds, 1, timeout * 1000);
 
-            } else if (!pollret) {
-                printf("Connection is closed\n");
-                close(connFd);
+            printf("The value of red is %d\n", ret);
+
+            if (ret == -1) {
+                send_500(connFd);
+                perror("poll");
                 break;
-                continue;
-
-            } else {
-
-                while((readline = read(connFd, line, BUF_SIZE)) > 0) {
-                    numRead += readline;
-                    if (numRead > BUF_SIZE) {
-                        send_400(connFd);
-                        return;
-                    }
-                    strcat(buf,line);
-                    if(strstr(line,"\r\n\r\n") != NULL) {
-                        memset(line,'\0',BUF_SIZE);
-                        break;
-                    }
-                    memset(line,'\0',BUF_SIZE);
-                }
             }
 
+            if (!ret) {
+                printf("timeout\n");    
+                send_408(connFd);
+
+                // close(connFd);
+                break;
+            }
+
+
+            if (fds[0].revents & POLLIN) {
+                int numRead = read(connFd, line, BUF_SIZE);
+                if (numRead > 0) {
+                    if (numRead + num_read > BUF_SIZE) {
+                        send_400(connFd);
+                    }
+                    num_read += numRead;
+
+                    strcat(buf, line);
+                    if (strstr(line, "\r\n\r\n") != NULL) {
+                        memset(line, '\0', BUF_SIZE);
+                        success = 1;
+                        break;
+                    }
+                    memset(line, '\0', BUF_SIZE);
+                }
+            }
+        }
+
+        if (success) {
+
+            pthread_mutex_lock(&mutexqueue);
             Request *request = parse(buf, BUF_SIZE, connFd); // Parse request
+            printf("request message is %s\n", buf);
+ 
+            pthread_mutex_unlock(&mutexqueue);
 
             if (!request) {
                 send_501(connFd); // Send 501 on parse failure
@@ -246,9 +278,13 @@ int main(int argc, char **argv)
             newtask->rootFolder = rootFolder;
             newtask->request = request;
             submit(*newtask);
-            break;
-        // }
+            PASS("Task submitted to the queue");
+
         }
+        else{
+            close(connFd);
+        }
+
     }
 
     for (i = 0; i < numThreads; i++) {
@@ -260,10 +296,11 @@ int main(int argc, char **argv)
     pthread_mutex_destroy(&mutexqueue);
     pthread_cond_destroy(&condqueue);
     return 0;
+
 }
 
-char *determine_mime_type(const char *ext)
-{
+
+char *determine_mime_type(const char *ext) {
     if (strcmp(ext, "html") == 0 || strcmp(ext, "htm") == 0)
         return "text/html";
     if (strcmp(ext, "css") == 0)
@@ -279,11 +316,10 @@ char *determine_mime_type(const char *ext)
     return NULL; // Default MIME type or unknown
 }
 
-void serve_file(int connFd, char *filepath, char *mimeType, int headOnly)
-{
+void serve_file(int connFd, char *filepath, char *mimeType, int headOnly) {
+
     struct stat sbuf;
-    if (stat(filepath, &sbuf) < 0)
-    {
+    if (stat(filepath, &sbuf) < 0) {
         send_404(connFd);
         return;
     }
@@ -309,39 +345,43 @@ void serve_file(int connFd, char *filepath, char *mimeType, int headOnly)
 
     write_all(connFd, header, strlen(header));
 
-    if (!headOnly)
-    {
+    if (!headOnly) {
         int fileFd = open(filepath, O_RDONLY);
         char buf[BUF_SIZE];
         ssize_t bytesRead;
-        while ((bytesRead = read(fileFd, buf, sizeof(buf))) > 0)
-        {
+        while ((bytesRead = read(fileFd, buf, sizeof(buf))) > 0) {
             write_all(connFd, buf, bytesRead);
         }
         close(fileFd);
     }
 }
 
-void send_404(int connFd)
-{
+void send_404(int connFd) {
     const char *response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
     write_all(connFd, response, strlen(response));
 }
 
-void send_501(int connFd)
-{
+void send_501(int connFd) {
     const char *response = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n";
     write_all(connFd, response, strlen(response));
 }
 
-void send_505(int connFd)
-{
+void send_505(int connFd) {
     const char *response = "HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\n\r\n";
     write_all(connFd, response, strlen(response));
 }
 
-void send_400(int connFd)
-{
+void send_400(int connFd) {
     const char *response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+    write_all(connFd, response, strlen(response));
+}
+
+void send_408(int connFd) {
+    const char *response = "HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\n\r\n";
+    write_all(connFd, response, strlen(response));
+}
+
+void send_500(int connFd) {
+    const char *response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
     write_all(connFd, response, strlen(response));
 }
