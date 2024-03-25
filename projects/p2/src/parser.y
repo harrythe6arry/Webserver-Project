@@ -198,26 +198,32 @@ t_ws {
 };
 
 request_line: token t_sp text t_sp text t_crlf {
-	YPRINTF("request_Line:\n%s\n%s\n%s\n",$1,$3,$5);
-        strcpy(parsing_request->http_method, $1);
+	YPRINTF("request_Line:\n%s\n%s\n%s\n",$1, $3,$5);
+    strcpy(parsing_request->http_method, $1);
 	strcpy(parsing_request->http_uri, $3);
 	strcpy(parsing_request->http_version, $5);
-};
+}
 
-request_header: token ows t_colon ows text ows t_crlf {
+/* request_header: token ows t_colon ows text ows t_crlf {
 	YPRINTF("request_Header:\n%s\n%s\n",$1,$5);
-        strcpy(parsing_request->headers[parsing_request->header_count].header_name, $1);
+	parsing_request->headers = realloc(parsing_request->headers, sizeof(Request_header)*(parsing_request->header_count+1));
+    strcpy(parsing_request->headers[parsing_request->header_count].header_name, $1);
 	strcpy(parsing_request->headers[parsing_request->header_count].header_value, $5);
 	parsing_request->header_count++;
-	parsing_request->headers = realloc(parsing_request->headers,sizeof(Request_header)*(parsing_request->header_count + 1));
-}; |
+}; */
 
-request_header token ows t_colon ows text ows t_crlf {
-	YPRINTF("request_Header:\n%s\n%s\n",$2,$6);
-    strcpy(parsing_request->headers[parsing_request->header_count].header_name, $2);
-	strcpy(parsing_request->headers[parsing_request->header_count].header_value, $6);
-	parsing_request->header_count++;
-	parsing_request->headers = realloc(parsing_request->headers,sizeof(Request_header)*(parsing_request->header_count + 1));
+request_header: token ows t_colon ows text ows t_crlf {
+    YPRINTF("request_Header:\n%s\n%s\n", $1, $5);
+    parsing_request->headers = realloc(parsing_request->headers, sizeof(Request_header)*(parsing_request->header_count+1));
+    strcpy(parsing_request->headers[parsing_request->header_count].header_name, $1);
+    strcpy(parsing_request->headers[parsing_request->header_count].header_value, $5);
+
+    // Capture Content-Length
+    if (strcasecmp($1, "Content-Length") == 0) {
+        parsing_request->content_length = atoi($5);
+    }
+
+    parsing_request->header_count++;
 };
 
 
@@ -228,14 +234,16 @@ request_header token ows t_colon ows text ows t_crlf {
  * 2616.  All the best!
  *
  */
-request: request_line request_header t_crlf{
-	YPRINTF("parsing_request: Matched Success.\n");
-	return SUCCESS;
-}; |
-request_line t_crlf{
+
+request_headers: request_headers request_header {}
+| {};    /* Request headers can be empty */
+
+request: request_line request_headers t_crlf{
 	YPRINTF("parsing_request: Matched Success.\n");
 	return SUCCESS;
 };
+
+
 
 %%
 
@@ -244,8 +252,8 @@ request_line t_crlf{
 void set_parsing_options(char *buf, size_t siz, Request *request)
 {
     parsing_buf = buf;
-    parsing_offset = 0;
-    parsing_buf_siz = siz;
+	parsing_offset = 0;
+	parsing_buf_siz = siz;
     parsing_request = request;
 }
 
